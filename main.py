@@ -1,24 +1,15 @@
-# main.py
-# -------------------------------------------------------
-# VEHICLE RED LIGHT VIOLATION DETECTION & CHALLAN SYSTEM
-# -------------------------------------------------------
-# Detects vehicles that cross a red signal line using YOLOv5
-# and automatically generates a challan PDF for each violator.
-# -------------------------------------------------------
-
 import os
 import sys
 import cv2
 import torch
 import numpy as np
+import re
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import cm
 
-# -------------------------------------------------------
-# 1. SETUP PROJECT PATHS
-# -------------------------------------------------------
+# === PATH SETUP ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VIOLATION_FOLDER = os.path.join(BASE_DIR, "violations")
 CHALLAN_FOLDER = os.path.join(BASE_DIR, "challans")
@@ -26,61 +17,64 @@ YOLOV5_FOLDER = os.path.join(BASE_DIR, "yolov5")
 
 os.makedirs(VIOLATION_FOLDER, exist_ok=True)
 os.makedirs(CHALLAN_FOLDER, exist_ok=True)
-
 sys.path.append(YOLOV5_FOLDER)
 
-# -------------------------------------------------------
-# 2. IMPORT YOLOv5 COMPONENTS
-# -------------------------------------------------------
+# === IMPORT YOLO COMPONENTS ===
 from models.common import DetectMultiBackend
 from utils.general import non_max_suppression, scale_boxes
 from utils.augmentations import letterbox
 
-# -------------------------------------------------------
-# 3. PDF CHALLAN GENERATION FUNCTION
-# -------------------------------------------------------
+# === UTILITIES ===
+def sanitize_filename(name: str) -> str:
+    """Removes illegal filename chars for Windows."""
+    return re.sub(r'[^A-Za-z0-9_\-]', '_', name)
+
 def create_challan_pdf(violation):
-    """
-    Creates a challan PDF for a red light violation.
-    """
-    pdf_path = os.path.join(CHALLAN_FOLDER, f"{violation['id']}.pdf")
-    c = canvas.Canvas(pdf_path, pagesize=A4)
-    width, height = A4
+    """Creates a challan PDF for the violator."""
+    safe_id = sanitize_filename(violation["id"])
+    pdf_path = os.path.join(CHALLAN_FOLDER, f"{safe_id}.pdf")
 
-    # Title
-    c.setFont("Helvetica-Bold", 20)
-    c.drawCentredString(width / 2, height - 3*cm, "Traffic Red Light Violation Challan")
+    try:
+        c = canvas.Canvas(pdf_path, pagesize=A4)
+        width, height = A4
 
-    # Details
-    c.setFont("Helvetica", 12)
-    y = height - 5*cm
-    gap = 1*cm
-    c.drawString(3*cm, y, f"Violation ID: {violation['id']}")
-    y -= gap
-    c.drawString(3*cm, y, f"Driver/Owner Name: {violation['name']}")
-    y -= gap
-    c.drawString(3*cm, y, f"Vehicle Number Plate: {violation['number_plate']}")
-    y -= gap
-    c.drawString(3*cm, y, f"Fine Amount: ₹{violation['fine']}")
-    y -= gap
-    c.drawString(3*cm, y, f"Date & Time: {violation['date']}")
-    y -= gap
+        # Title
+        c.setFont("Helvetica-Bold", 20)
+        c.drawCentredString(width / 2, height - 2.5 * cm, "TRAFFIC VIOLATION CHALLAN")
 
-    # Vehicle image
-    if os.path.exists(violation["image_path"]):
-        img_w = 12*cm
-        img_h = 12*cm
-        c.drawImage(violation["image_path"], 3*cm, y - img_h, width=img_w, height=img_h)
+        c.setFont("Helvetica", 12)
+        y = height - 4 * cm
+        for key, value in [
+            ("Challan ID", violation["id"]),
+            ("Vehicle Type", violation["vehicle_type"]),
+            ("Vehicle Number", violation["number_plate"]),
+            ("Offense", "Red Light Violation"),
+            ("Fine", f"₹{violation['fine']}"),
+            ("Date & Time", violation["date"]),
+            ("Location", violation["location"]),
+        ]:
+            c.drawString(3 * cm, y, f"{key}: {value}")
+            y -= 1 * cm
 
-    c.save()
-    print(f"✅ Challan PDF created: {pdf_path}")
+        # Attach violator image
+        if os.path.exists(violation["image_path"]):
+            img_w, img_h = 12 * cm, 8 * cm
+            c.drawImage(violation["image_path"], 3 * cm, y - img_h, width=img_w, height=img_h)
+        else:
+            print(f"⚠️ Image not found: {violation['image_path']}")
 
-# -------------------------------------------------------
-# 4. LOAD YOLOv5 MODEL
-# -------------------------------------------------------
+        c.setFont("Helvetica-Oblique", 10)
+        c.drawString(3 * cm, 2 * cm, "System-generated challan (no signature required).")
+        c.save()
+        print(f"✅ Challan generated: {pdf_path}")
+
+    except Exception as e:
+        print(f"❌ Error generating challan: {e}")
+
+# === LOAD YOLO MODEL ===
 model_path = os.path.join(BASE_DIR, "best.pt")
 if not os.path.exists(model_path):
-    print(f"❌ ERROR: YOLO model not found at {model_path}")
+    print(f"❌ YOLO model not found at: {model_path}")
     sys.exit()
 
 print("🔄 Loading YOLOv5 model...")
@@ -88,66 +82,46 @@ model = DetectMultiBackend(model_path)
 model.eval()
 stride, names = model.stride, model.names
 img_size = 640
-print("✅ YOLOv5 model loaded successfully.")
+print("✅ YOLOv5 model loaded successfully.\n")
 
-# -------------------------------------------------------
-# 5. FIND VIDEO FILE
-# -------------------------------------------------------
-video_candidates = [f for f in os.listdir(BASE_DIR) if f.lower().endswith(".mp4")]
-if not video_candidates:
-    print("❌ ERROR: No video file found in project folder.")
+# === LOAD VIDEO ===
+videos = [f for f in os.listdir(BASE_DIR) if f.lower().endswith(".mp4")]
+if not videos:
+    print("❌ No .mp4 file found in folder.")
     sys.exit()
 
-video_file = os.path.join(BASE_DIR, video_candidates[0])
-cap = cv2.VideoCapture(video_file)
+video_path = os.path.join(BASE_DIR, videos[0])
+cap = cv2.VideoCapture(video_path)
 if not cap.isOpened():
-    print(f"❌ ERROR: Could not open video {video_file}")
+    print(f"❌ Cannot open video: {video_path}")
     sys.exit()
 
-# -------------------------------------------------------
-# 6. DETECTION PARAMETERS
-# -------------------------------------------------------
-frame_num = 0
-signal_state = "RED"  # Simulated traffic light
-signal_timer = 0
-signal_duration = 150  # frames between state changes
-line_y = 300  # position of the stop line (adjust as per video)
+fps = int(cap.get(cv2.CAP_PROP_FPS))
+total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+video_duration = total_frames / fps
+print(f"🎥 Loaded video: {os.path.basename(video_path)} ({video_duration:.2f}s)\n")
 
-# -------------------------------------------------------
-# 7. START PROCESSING VIDEO
-# -------------------------------------------------------
-print("\n🚦 Starting red light violation detection...")
+# === DETECTION ===
+print("🚦 Starting vehicle detection (one challan per vehicle)...\n")
+
+violated = set()  # to prevent multiple challans for same vehicle
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    frame_num += 1
+    current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+    current_time = current_frame / fps
 
-    # Toggle signal (simulate red/green every few seconds)
-    signal_timer += 1
-    if signal_timer > signal_duration:
-        signal_state = "GREEN" if signal_state == "RED" else "RED"
-        signal_timer = 0
-
-    # Draw stop line and traffic signal on video
-    color = (0, 0, 255) if signal_state == "RED" else (0, 255, 0)
-    cv2.line(frame, (0, line_y), (frame.shape[1], line_y), color, 3)
-    cv2.circle(frame, (50, 50), 20, color, -1)
-    cv2.putText(frame, f"Signal: {signal_state}", (80, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
-
-    # YOLOv5 preprocessing
+    # === YOLO INFERENCE ===
     img = letterbox(frame, img_size, stride=stride, auto=True)[0]
     img = img[:, :, ::-1].transpose(2, 0, 1)
     img = np.ascontiguousarray(img)
-
     img_tensor = torch.from_numpy(img).float() / 255.0
     if img_tensor.ndimension() == 3:
         img_tensor = img_tensor.unsqueeze(0)
 
-    # YOLO inference
     pred = model(img_tensor)
     pred = non_max_suppression(pred, 0.25, 0.45, None, False, max_det=1000)
 
@@ -156,45 +130,47 @@ while True:
             det[:, :4] = scale_boxes(img_tensor.shape[2:], det[:, :4], frame.shape).round()
 
             for *xyxy, conf, cls in det:
-                cls = int(cls)
-                cls_name = names.get(cls, f"class_{cls}")
-
-                # Draw detection boxes
                 x1, y1, x2, y2 = map(int, xyxy)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                cv2.putText(frame, cls_name, (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+                cls_name = names[int(cls)] if int(cls) in names else "vehicle"
 
-                # Check for violation
-                vehicle_center_y = (y1 + y2) // 2
-                if signal_state == "RED" and vehicle_center_y < line_y:
-                    print(f"🚨 Violation detected at frame {frame_num} ({cls_name})")
+                # Create a simple hash-like ID for the vehicle bounding box
+                vid = f"{cls_name}_{x1}_{y1}_{x2}_{y2}"
 
-                    # Crop violating vehicle
+                # If not already processed, create challan
+                if vid not in violated:
+                    violated.add(vid)
+                    print(f"🚨 New vehicle detected: {cls_name}")
+
+                    # Save cropped vehicle image
                     crop = frame[y1:y2, x1:x2]
-                    violation_id = f"V{frame_num}_{datetime.now().strftime('%H%M%S')}"
-                    image_path = os.path.join(VIOLATION_FOLDER, f"{violation_id}.jpg")
+                    violation_id = f"V_{cls_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    image_path = os.path.join(VIOLATION_FOLDER, f"{sanitize_filename(violation_id)}.jpg")
                     cv2.imwrite(image_path, crop)
 
-                    # Generate PDF challan
+                    # Generate challan
                     violation_info = {
                         "id": violation_id,
-                        "name": "John Doe",
+                        "name": "Unknown Driver",
                         "number_plate": "MH12AB1234",
+                        "vehicle_type": cls_name,
                         "fine": 2000,
                         "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "image_path": image_path
+                        "image_path": image_path,
+                        "location": "Signal Junction, City Center"
                     }
                     create_challan_pdf(violation_info)
 
-    # Optional: show video while processing (press 'q' to quit)
-    cv2.imshow("Traffic Monitoring", frame)
+                # Draw box and label
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame, cls_name, (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+    cv2.imshow("Vehicle Detection", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
 cv2.destroyAllWindows()
-
 print("\n✅ Detection complete.")
-print(f"📸 Violation images saved in: {VIOLATION_FOLDER}")
-print(f"📄 Challan PDFs saved in: {CHALLAN_FOLDER}")
+print(f"📸 Vehicle images saved in: {VIOLATION_FOLDER}")
+print(f"📄 Challans saved in: {CHALLAN_FOLDER}")
